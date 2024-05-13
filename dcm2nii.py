@@ -10,22 +10,25 @@ import radiomics
 from radiomics import featureextractor, imageoperations
 
 # Load CT scan and segmentation mask
-folder = '../dataset/CT/'
-ImageFolder = 'image'
-MaskFolder = 'mask'
+folder = '/scratch/yx2432/dataset/CT'
+ImageFolder = 'Image'
+MaskFolder = 'Mask'
 TargetFolder = 'ct'
 
 # ============= convert .dcm file to .nii file =============
 
 if __name__ == '__main__':
+    nii_folder = os.path.join('../dataset/CT', TargetFolder)
+    if not os.path.exists(nii_folder):
+        os.makedirs(nii_folder) 
+            
     for subfolder in os.listdir(os.path.join(folder, ImageFolder)):
         if subfolder.startswith('.'):   # skip undesired folders
             continue
+        if os.path.exists(os.path.join(nii_folder, subfolder + '.nii.gz')): 
+            continue
 
         ct_dir = os.path.join(folder, ImageFolder, subfolder)
-        nii_folder = os.path.join(folder, TargetFolder)
-        if not os.path.exists(nii_folder):
-            os.makedirs(nii_folder)
 
         reader = sitk.ImageSeriesReader()
         ct_names = reader.GetGDCMSeriesFileNames(ct_dir)
@@ -35,3 +38,4 @@ if __name__ == '__main__':
 
         # store the image as nii file
         sitk.WriteImage(fixed_image, os.path.join(nii_folder, subfolder + '.nii.gz'))
+        print('--finished converting image {}'.format(subfolder))

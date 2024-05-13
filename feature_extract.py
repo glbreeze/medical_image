@@ -6,9 +6,9 @@ import SimpleITK as sitk
 from concurrent.futures import ThreadPoolExecutor
 
 folder = '../dataset/CT/'
-ImageFolder = 'image'
-MaskFolder = 'mask'
-TargetFolder = 'ct'
+ImageFolder = '/scratch/yx2432/dataset/CT/Image'
+MaskFolder = '/scratch/yx2432/dataset/CT/Mask'
+TargetFolder = '../dataset/CT/ct'
 
 params = {
     "binWidth": 25,
@@ -31,24 +31,26 @@ extractor = featureextractor.RadiomicsFeatureExtractor(**params)
 extractor.enableImageTypes(**image_types)
 
 
-df = pd.DataFrame()
-for imageName in os.listdir(os.path.join(folder, TargetFolder)):
-        ImagePath = os.path.join(folder, TargetFolder, imageName)
-        MaskPath = os.path.join(folder, MaskFolder, imageName)
-        if os.path.exists(MaskPath):
-            try:
-                featureVector = extractor.execute(ImagePath, MaskPath)
-                df_add = pd.DataFrame.from_dict(featureVector.values()).T
-                df_add.columns = featureVector.keys()
-                df_add.insert(0, 'imageName', imageName.split('.')[0])
-                df = pd.concat([df, df_add])
-            except Exception as e:
-                print(f"extracting feature from {ImagePath} and {MaskPath}, Error {e}")
-                continue
-        else:
-            print('The File for mask {} does NOT exist'.format(MaskPath))
+if __name__ == '__main__':
+    df = pd.DataFrame()
+    for imageName in os.listdir(TargetFolder):
+            ImagePath = os.path.join(TargetFolder, imageName)
+            MaskPath = os.path.join(MaskFolder, imageName)
+            if os.path.exists(MaskPath):
+                try:
+                    featureVector = extractor.execute(ImagePath, MaskPath)
+                    df_add = pd.DataFrame.from_dict(featureVector.values()).T
+                    df_add.columns = featureVector.keys()
+                    df_add.insert(0, 'imageName', imageName.split('.')[0])
+                    df = pd.concat([df, df_add])
+                    print('Finished extracting feature for {}'.format(imageName))
+                except Exception as e:
+                    print(f"extracting feature from {ImagePath} and {MaskPath}, Error {e}")
+                    continue
+            else:
+                print('The File for mask {} does NOT exist'.format(MaskPath))
 
 
-result_file = os.path.join(folder, 'ml_features.xlsx')
-df.to_excel(result_file, index=False)
-print("Have stored file to {}".format(result_file))
+    result_file = os.path.join(folder, 'ml_features.xlsx')
+    df.to_excel(result_file, index=False)
+    print("Have stored file to {}".format(result_file))
