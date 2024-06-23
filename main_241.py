@@ -15,10 +15,15 @@ from sklearn.metrics import confusion_matrix
 from matplotlib import pyplot as plt
 from sklearn.metrics import roc_auc_score
 import numpy as np
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict
 
 folder = '../dataset/CT/'
-n_feat = 50
+
+def find_key_by_value(d, value):
+    for key, val in d.items():
+        if abs(val - value) <= 1e-8:
+            return key
+    return None
 
 # ========================================== clinical feature ============================================
 cl_features = pd.read_excel(os.path.join(folder, '影像组学总库2024-6-6.xlsx'))
@@ -64,6 +69,10 @@ test_df = pd.read_csv(os.path.join(folder, 'all_features_241.csv'))
 test_df['PDL1_number'] = test_df['PDL1_number'].replace('<1', '0')
 test_df['PDL1_number'] = test_df['PDL1_number'].replace('1-49', '40')
 
+num_ml_feat = 50
+ml_feat_start = train_df.columns.get_loc('wavelet2-LLL_gldm_LargeDependenceHighGrayLevelEmphasis')
+train_df = train_df.drop(train_df.columns[ml_feat_start+num_ml_feat:], axis=1)
+test_df = test_df.drop(test_df.columns[ml_feat_start+num_ml_feat:], axis=1)
 # ================================== Process features  ==============================
 
 for df in [train_df, test_df]:
@@ -87,7 +96,6 @@ for df in [train_df, test_df]:
         df['y'] = np.log1p(df['ORR'] / 100 + 1)
 
 # ========================================= Classification =====================================
-from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict
 
 X_train, y_train = train_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_df['Group']
 X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), test_df['Group']
@@ -100,7 +108,7 @@ param_grid = {
     'max_depth': [2, 3, 4, 5],
     'learning_rate': [0.01, 0.05, 0.1]
 }
-grid_search = GridSearchCV(estimator=cls, param_grid=param_grid, cv=5, scoring='accuracy', verbose=1,
+grid_search = GridSearchCV(estimator=cls, param_grid=param_grid, cv=5, scoring='roc_auc', verbose=1,
                            n_jobs=-1)  # roc_auc_ovr
 grid_search.fit(X_train, y_train)
 
@@ -117,8 +125,6 @@ accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
 auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
 print('accuracy: {:.4f}, auc: {:.4f}'.format(accuracy, auc))
 
-
-plt.scatter(test_df['ORR'], y_pred)
 
 # ==== now plot the training roc
 best_model = xgb.XGBClassifier(**grid_search.best_params_)
@@ -137,14 +143,101 @@ plot_cm(y_val, y_pred)
 plot_cm(y_val, y_pred_p >= 0.75)
 plot_roc(y_val, y_pred_p)
 
+
+# ========================================= Classification with subset  =====================================
+from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict
+
+del_col = ['wavelet2-LLL_gldm_LargeDependenceLowGrayLevelEmphasis']
+out_dict = {}
+for set_name in ['lungmate-001', 'lungmate-002', 'lungmate-009']:
+    train_df_sub = train_df[train_df['set'] != set_name]
+    X_train, y_train = train_df_sub.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_df_sub['Group']
+    X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), test_df['Group']
+
+    cls = xgb.XGBClassifier()
+    cls.fit(X_train, y_train)
+
+    y_pred = cls.predict(X_val)
+    y_pred_p = cls.predict_proba(X_val)[:, 1]
+    accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
+    auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
+    print('get rid of {}, accuracy: {:.4f}, auc: {:.4f}'.format(set_name, accuracy, auc))
+    out_dict['col'] = [accuracy, auc]
+
+# ================================================== Regression choose subset ==================================================
+out_dict = {}
+
+for set_name in ['lungmate-001', 'lungmate-002', 'lungmate-009', 'none']:
+    train_df_sub = train_df[train_df['set'] != set_name]
+    X_train, y_train = train_df_sub.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_df_sub['Group']
+    X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), test_df['Group']
+
+    cls = xgb.XGBRegressor()
+    cls.fit(X_train, y_train)
+    y_pred = cls.predict(X_val)
+
+    if trans == 'log1p':
+        TH = np.log1p(1.3)
+    elif trans == 'box-cox':
+        TH = (1.3 ** lambda_value - 1) / lambda_value
+
+    auc = sklearn.metrics.roc_auc_score((y_val > TH).astype(int), y_pred)
+    print('get rid of {}, auc is {}'.format(set_name, auc))
+    out_dict[set_name] = auc
+
+max(out_dict.values())
+plt.scatter(test_df['ORR'], y_pred)
+
+# ========================================= Classification =====================================
+from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict
+
+del_col = ['wavelet2-LLL_gldm_LargeDependenceLowGrayLevelEmphasis']
+out_dict = {}
+for col in [col for col in train_df.columns if col not in ['imageName', 'Group', 'set', 'ORR', 'y', 'Group']]:
+    X_train, y_train = train_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y', col] + del_col), train_df['Group']
+    X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y', col] + del_col), test_df['Group']
+
+    cls = xgb.XGBClassifier()
+    cls.fit(X_train, y_train)
+
+    y_pred = cls.predict(X_val)
+    y_pred_p = cls.predict_proba(X_val)[:, 1]
+    accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
+    auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
+    print('get rid of {}, accuracy: {:.4f}, auc: {:.4f}'.format(col, accuracy, auc))
+    out_dict['col'] = [accuracy, auc]
+
 # ================================================== Regression ==================================================
+train_df_sub = train_df[train_df['set'] != 'lungmate-002']
 
-train_set = all_features[all_features['set'].isin(['lungmate-009'])]
-val_set = all_features[all_features['set'].isin(['lungmate-001', 'lungmate-002'])]
+del_cols = []
+for i in range(20):
+    out_dict = {}
+    for col in [col for col in train_df.columns if col not in ['imageName', 'Group', 'set', 'ORR', 'y', 'Group'] + del_cols]:
+        X_train, y_train = train_df_sub.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y', col] + del_cols), train_df_sub['y']
+        X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y', col]+del_cols), test_df['y']
 
-X_train, y_train = train_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_set['y']
-X_val, y_val = val_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), val_set['y']
+        cls = xgb.XGBRegressor()
+        cls.fit(X_train, y_train)
+        y_pred = cls.predict(X_val)
 
+        if trans == 'log1p':
+            TH = np.log1p(1.3)
+        elif trans == 'box-cox':
+            TH = (1.3 ** lambda_value - 1) / lambda_value
+
+        auc = sklearn.metrics.roc_auc_score((y_val > TH).astype(int), y_pred)
+        print('get rid of {}, auc is {}'.format(col, auc))
+        out_dict[col] = auc
+
+    del_col = find_key_by_value(out_dict, max(out_dict.values()))
+    print('\n====>Step: {}, del col: {}, the max auc is: {:.4f}'.format(i, del_col, max(out_dict.values())))
+    del_cols.append(del_col)
+
+
+# ========================================= Final regression =====================================
+X_train, y_train = train_df_sub.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y'] + del_cols), train_df_sub['y']
+X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']+del_cols), test_df['y']
 cls = xgb.XGBRegressor()
 cls.fit(X_train, y_train)
 y_pred = cls.predict(X_val)
@@ -154,167 +247,87 @@ if trans == 'log1p':
 elif trans == 'box-cox':
     TH = (1.3 ** lambda_value - 1) / lambda_value
 
-for th in np.linspace(0.1, 1, 20):
-    y1_pred = (y_pred > th).astype(int)
-    y1_val = (y_val > TH).astype(int)
-    accuracy_score = np.sum(y1_pred == y1_val) / len(y1_val)
-    print(th, 'acc', accuracy_score)
-
-auc = sklearn.metrics.roc_auc_score((y_val > TH).astype(int), y_pred)
-
-print('accuracy {:.4f}, auc: {:.4f}'.format(accuracy_score, auc))
-
-# ============================================ New Split  + Classification=========================================
-train_set = all_features[all_features['set'].isin(['lungmate-009', 'lungmate-001'])]
-val_set = all_features[all_features['set'].isin(['lungmate-002'])]
-
-X_train, y_train = train_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_set['Group']
-X_val, y_val = val_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), val_set['Group']
-
-cls = xgb.XGBClassifier()
-cls.fit(X_train, y_train)
-y_pred = cls.predict(X_val)
-y_pred_p = cls.predict_proba(X_val)[:, 1]
-
-accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
-auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
-print('Accuracy {:.4f}, AUC: {:.4f}'.format(accuracy, auc))
-
-plot_cm(y_val, y_pred)
-plot_feat_importance(cls, X_train.columns, K=20)
-plot_roc(y_val, y_pred_p)
-
-# ============================================ New Split  + Regression =========================================
-train_set = all_features[all_features['set'].isin(['lungmate-009', 'lungmate-001'])]
-val_set = all_features[all_features['set'].isin(['lungmate-002'])]
-
-X_train, y_train = train_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_set['y']
-X_val, y_val = val_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), val_set['y']
-
-cls = xgb.XGBRegressor()
-cls.fit(X_train, y_train)
-y_pred = cls.predict(X_val)
-
-if trans == 'log1p':
-    TH = np.log1p(1.3)
-elif trans == 'box-cox':
-    TH = (1.3 ** lambda_value - 1) / lambda_value
-
-for th in np.linspace(0.1, 1, 20):
-    y1_pred = (y_pred > th).astype(int)
-    y1_val = (y_val > TH).astype(int)
-    accuracy_score = np.sum(y1_pred == y1_val) / len(y1_val)
-    print(th, 'acc', accuracy_score)
-
-accuracy = np.sum((y_pred > TH).astype(int) == (y_val > TH).astype(int)) / len(y_val)
-auc = sklearn.metrics.roc_auc_score((y_val > TH).astype(int), y_pred)
+accuracy = np.sum((y_pred > TH-0.1).astype(int) == (y_val > TH).astype(int))/len(y_val)
+auc = sklearn.metrics.roc_auc_score((y_val>TH).astype(int), y_pred)
 print('accuracy {:.4f}, auc: {:.4f}'.format(accuracy, auc))
 
-plot_cm((y_val > TH).astype(int), (y_pred > TH).astype(int))
+plot_cm((y_val > TH-0.1).astype(int), (y_pred > TH-0.1).astype(int))
 
 plot_feat_importance(cls, X_train.columns, K=20)
 
-plot_roc((y_val > TH).astype(int), y_pred)
+plot_roc((y_val>TH).astype(int), y_pred)
 
-# ============================================= random split + Classification ==========================================
 
-X_train, X_val, y_train, y_val = train_test_split(all_features.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']),
-                                                  all_features['Group'], test_size=0.3, random_state=21)
+from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict
 
-cls = xgb.XGBClassifier()
-cls.fit(X_train, y_train)
-
-y_pred = cls.predict(X_val)
-y_pred_p = cls.predict_proba(X_val)[:, 1]
-accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
-auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
-
-print('accuracy {} auc {}'.format(accuracy, auc))
-
-plot_cm(y_val, y_pred)
-
-plot_feat_importance(cls, X_train.columns, K=20)
-
-plot_roc(y_val, y_pred_p)
-
-# ============================================= random split + Regression ==========================================
-X_train, X_val, y_train, y_val = train_test_split(all_features.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']),
-                                                  all_features['Group'], test_size=0.3, random_state=21)
-
-X_train, y_train = train_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_set['y']
-X_val, y_val = val_set.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), val_set['y']
+X_train, y_train = train_df_sub.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y', col] + del_cols), train_df_sub['y']
+X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y', col]+del_cols), test_df['y']
 
 cls = xgb.XGBRegressor()
-cls.fit(X_train, y_train)
-y_pred = cls.predict(X_val)
 
-if trans == 'log1p':
-    TH = np.log1p(1.3)
-elif trans == 'box-cox':
-    TH = (1.3 ** lambda_value - 1) / lambda_value
+# Grid search of the hyper-parameters
+param_grid = {
+    'n_estimators': [50, 100, 200],
+    'max_depth': [2, 3, 4, 5],
+    'learning_rate': [0.01, 0.05, 0.1]
+}
+grid_search = GridSearchCV(estimator=cls, param_grid=param_grid, cv=5, scoring='accuracy', verbose=1, n_jobs=-1) # roc_auc_ovr
+grid_search.fit(X_train, y_train)
 
-for th in np.linspace(0.1, 1, 20):
-    y1_pred = (y_pred > th).astype(int)
-    y1_val = (y_val > TH).astype(int)
-    accuracy_score = np.sum(y1_pred == y1_val) / len(y1_val)
-    print(th, 'acc', accuracy_score)
+print("Best Parameters:", grid_search.best_params_)
+print("Best Score:", grid_search.best_score_)
 
-accuracy = np.sum((y_pred > TH).astype(int) == (y_val > TH).astype(int)) / len(y_val)
-auc = sklearn.metrics.roc_auc_score((y_val > TH).astype(int), y_pred)
-print('accuracy {:.4f}, auc: {:.4f}'.format(accuracy, auc))
+# best_model = grid_search.best_estimator_
+best_model = xgb.XGBClassifier(**grid_search.best_params_)
+best_model.fit(X_train, y_train)
 
-plot_cm((y_val > TH).astype(int), (y_pred > TH).astype(int))
-
-plot_feat_importance(cls, X_train.columns, K=20)
-
-plot_roc((y_val > TH).astype(int), y_pred)
-
-# ================================================== oversample ==================================================
-for feature in ['性别', '是否吸烟', 'PDL1_expression', '病理诊断_文本', '临床试验分期']:
-    # Convert categorical feature to integer codes
-    all_features[feature] = all_features[feature].astype('category').cat.codes
-all_features['set'] = all_features['set'].replace('lungmate-009', 'train_set')
-all_features['set'] = all_features['set'].replace(['lungmate-001', 'lungmate-002'], 'validation_set')
-train_set = all_features[all_features['set'] == 'train_set']
-val_set = all_features[all_features['set'] == 'validation_set']
-
-val_counts = val_set[val_set['set'] == 'validation_set'].groupby(['Group', '病例完成治疗的周期数']).size()
-
-train_counts = train_set.groupby(['Group', '病例完成治疗的周期数']).size()
-
-# Calculate weight for each unique combination based on the desired proportion in the train dataset
-weights = val_counts.div(train_counts, fill_value=0)
-lower_cap, upper_cap = 0.5, 2  # Define the cap value
-weights = weights.clip(lower=lower_cap, upper=upper_cap)
-
-train_set['weight'] = train_set.apply(lambda row: weights.get((row['Group'], row['病例完成治疗的周期数']), 1), axis=1)
-
-X_train, y_train = train_set.drop(columns=['imageName', 'Group', 'set', 'weight']), train_set['Group']
-X_val, y_val = val_set.drop(columns=['imageName', 'Group', 'set']), val_set['Group']
-
-dtrain = xgb.DMatrix(X_train, label=y_train, enable_categorical=True)
-dval = xgb.DMatrix(X_val, label=y_val, enable_categorical=True)
-
-cls = xgb.XGBClassifier()
-cls.fit(X_train, y_train, sample_weight=train_set['weight'])
-
-y_pred = cls.predict(X_val)
-accuracy = accuracy_score(y_val, y_pred)
-
-auc = roc_auc_score(y_val, y_pred)
-
+y_pred = best_model.predict(X_val)
+y_pred_p = best_model.predict_proba(X_val)[:, 1]
+accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
+auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
 print('accuracy: {:.4f}, auc: {:.4f}'.format(accuracy, auc))
 
-##
-neg, pos = np.bincount(y_train)
+# ==== now plot the training roc
+best_model = xgb.XGBClassifier(**grid_search.best_params_)
+y_pred_p = cross_val_predict(best_model, X_train, y_train, cv=5, method='predict_proba')
+y_pred = np.argmax(y_pred_p, axis=1)
+y_pred_p = y_pred_p[:,1]
+accuracy = sklearn.metrics.accuracy_score(y_train, y_pred)
+auc = sklearn.metrics.roc_auc_score(y_train, y_pred_p)
+print('accuracy: {:.4f}, auc: {:.4f}'.format(accuracy, auc))
 
-# Calculate scale_pos_weight value
-scale_pos_weight = neg / pos
-
-# Initialize XGBoost classifier with scale_pos_weight parameter
-model = xgb.XGBClassifier(scale_pos_weight=scale_pos_weight)
-
-
+# ===== feature importance and cm
+plot_feat_importance(cls, X_train.columns, K=20)
+plot_cm(y_val, y_pred)
+plot_cm(y_val, y_pred_p>=0.75)
+plot_roc(y_val, y_pred_p)
 
 
+
+if trans == 'log1p':
+    TH = np.log1p(1.3)
+elif trans == 'box-cox':
+    TH = (1.3**lambda_value - 1)/lambda_value
+
+accuracy = np.sum((y_pred > TH).astype(int) == (y_val > TH).astype(int))/len(y_val)
+auc = sklearn.metrics.roc_auc_score((y_val>TH).astype(int), y_pred)
+print('accuracy {:.4f}, auc: {:.4f}'.format(accuracy, auc))
+
+plot_cm((y_val > TH).astype(int), (y_pred > TH).astype(int))
+
+plot_feat_importance(cls, X_train.columns, K=20)
+
+plot_roc((y_val>TH).astype(int), y_pred)
+
+
+
+
+
+for th in np.linspace(0.1, 1, 20):
+    y1_pred = (y_pred > th).astype(int)
+    y1_val = (y_val > TH).astype(int)
+    accuracy_score = np.sum(y1_pred == y1_val) / len(y1_val)
+    print(th, 'acc', accuracy_score)
+
+print('accuracy {:.4f}, auc: {:.4f}'.format(accuracy_score, auc))
 
