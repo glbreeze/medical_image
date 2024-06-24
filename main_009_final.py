@@ -1,31 +1,28 @@
 # -*- coding: utf-8 -*-
+from utils import plot_cm, plot_roc, plot_feat_importance, catboost_cross_val_predict
+
 import os, sklearn
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-import matplotlib
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import GradientBoostingClassifier
-from utils import plot_cm, plot_roc, plot_feat_importance
-import seaborn as sns
-import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix
-from matplotlib import pyplot as plt
-from sklearn.metrics import roc_auc_score
-import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict, cross_val_score
 import lightgbm as lgb
 from catboost import CatBoostClassifier
+
+from boruta import BorutaPy
+import matplotlib.pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import confusion_matrix, accuracy_score
+from sklearn.model_selection import GridSearchCV, train_test_split, cross_val_predict, StratifiedKFold
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
 
 folder = '../dataset/CT/'
 n_feat = 30
 categorical_features = ['性别', '是否吸烟', 'PDL1_expression', '病理诊断_文本', '临床试验分期', '临床试验分期T']
+
+all_result ={}
 
 # ========================================== clinical feature ============================================
 cl_features = pd.read_excel(os.path.join(folder, '影像组学总库2024-6-6.xlsx'))
@@ -53,30 +50,39 @@ cl_features['PDL1_number'] = cl_features['PDL1_number'].replace(replacement_dict
 cl_features.replace(['Unknown', 'Others'], 'missing', inplace=True)
 cl_features = cl_features[cl_features['Group'].notna()]
 
-if False:
-    cnt = cl_features.groupby(['set']).size().reset_index(name='Count')
-    print(cnt)
-
 # ====================== ml feature and feature selection======================
 ml_features = pd.read_excel(os.path.join(folder, 'ml_feature_2.xlsx'))
-
 ml_features = pd.merge(cl_features[cl_features['set'].isin(['lungmate-009', 'lungmate-002', 'lungmate-001'])]['imageName'],
                        ml_features, on='imageName', how='inner')
 
-
 X = ml_features.drop(columns=['imageName', 'Group'])  # Exclude non-feature columns
 y = ml_features['Group']
-clf = RandomForestClassifier(n_estimators=100, criterion='gini', random_state=21)
-clf.fit(X, y)
 
-feature_importances = clf.feature_importances_
-importance_df = pd.DataFrame({'Feature': X.columns, 'Importance': feature_importances})
-importance_df = importance_df.sort_values(by='Importance', ascending=False)
+method = 'rf'
+if method == 'rf':
+    clf = RandomForestClassifier(n_estimators=100, criterion='gini', random_state=21)
+    clf.fit(X, y)
 
-# === select top features based on importance threshold
-threshold = np.partition(feature_importances, -n_feat)[-n_feat]
-top_features = importance_df[importance_df['Importance'] > threshold]['Feature'].tolist()
-selected_ml_features = ml_features[['imageName']+top_features]
+    feature_importances = clf.feature_importances_
+    importance_df = pd.DataFrame({'Feature': X.columns, 'Importance': feature_importances})
+    importance_df = importance_df.sort_values(by='Importance', ascending=False)
+
+    threshold = np.partition(feature_importances, -n_feat)[-n_feat]
+    top_features = importance_df[importance_df['Importance'] > threshold]['Feature'].tolist()
+    selected_ml_features = ml_features[['imageName']+top_features]
+else:
+    rf = RandomForestClassifier(n_estimators=100, criterion='gini', random_state=42)
+    boruta_selector = BorutaPy(rf, n_estimators='auto', random_state=42)  # n_estimators='auto'
+
+    np.int = np.int32
+    np.float = np.float64
+    np.bool = np.bool_
+    boruta_selector.fit(np.array(X), np.array(y))
+    selected_features = pd.DataFrame({'Feature': list(X.columns),
+                                      'Ranking': boruta_selector.ranking_}).sort_values(by='Ranking')
+    top_features = list(selected_features[selected_features["Ranking"] < n_feat]['Feature'])
+    selected_ml_features = ml_features[['imageName'] + top_features]
+
 
 # ================================== combine ml feature with cl features ==============================
 all_features = pd.merge(cl_features[cl_features['set'].isin(['lungmate-009', 'lungmate-002', 'lungmate-001'])],
@@ -93,15 +99,12 @@ for col in all_features.columns:
         print(col, 'has na',  all_features[col].isna().any())
 
 # ================================== Preprocess features for XGBoost ==============================
-def process_df(all_features, cat='xg'):
+def process_df(all_features):
     all_features['PDL1_number'] = all_features['PDL1_number'].replace('missing', np.nan)
     all_features['PDL1_number'] = pd.to_numeric(all_features['PDL1_number'])
 
     for feature in categorical_features:
-        if cat == 'xg' or cat == 'lgb':
-            all_features[feature] = all_features[feature].astype('category').cat.codes
-        elif cat == 'cat':
-            all_features[feature] = all_features[feature].astype('category')
+        all_features[feature] = all_features[feature].astype('category').cat.codes
 
     trans = 'log1p'
     # === which transformation
@@ -140,7 +143,7 @@ def load_data(all_data, split_type):
 # ========================================= XGBoost Classification =====================================
 
 split_type = '19_2'
-all_data = process_df(all_features, cat='xg')
+all_data = process_df(all_features)
 X_train, y_train, X_val, y_val = load_data(all_data, split_type)
 
 cls = xgb.XGBClassifier()
@@ -166,6 +169,8 @@ accuracy = sklearn.metrics.accuracy_score(y_val, y_pred)
 auc = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
 print('Test Accuracy: {:.4f}, AUC: {:.4f}'.format(accuracy, auc))
 
+all_result['xgboost'] = [y_val, y_pred_p]
+
 plot_feat_importance(best_model, X_train.columns, K=20)
 plot_cm(y_val, y_pred_p>=0.5)
 plot_roc(y_val, y_pred_p)
@@ -184,91 +189,163 @@ plot_roc(y_train, y_pred_p)
 
 
 # ========================================= LightGBM Classification =====================================
-split_type = '19_2'
-all_data = process_df(all_features, cat='xg')
+all_data = process_df(all_features)
 X_train, y_train, X_val, y_val = load_data(all_data, split_type)
 
-
-lgbm = lgb.LGBMClassifier(random_state=42)
+lgbm = lgb.LGBMClassifier(random_state=42)  # num_iterations=50
 
 param_grid = {
-    'num_leaves': [31, 50],
-    'learning_rate': [0.01, 0.1],
-    'n_estimators': [100, 200]
+    "learning_rate": [0.001],
+    "num_leaves": [31, 63, 127],
+    "max_depth": [-1, 3, 5],
+    "subsample": [0.8, 1.0]
 }
+grid_search = GridSearchCV(lgbm, param_grid, cv=5, scoring="roc_auc")
+grid_search.fit(X_train, y_train)
+print(f"Best parameters: {grid_search.best_params_}")
+print(f"Best score: {grid_search.best_score_}")
 
-grid_search = GridSearchCV(estimator=lgbm, param_grid=param_grid, cv=5, scoring='accuracy', n_jobs=-1)
-grid_search.fit(X_train, y_train, categorical_feature=categorical_features)
+best_lgbm = lgb.LGBMClassifier(random_state=42, **grid_search.best_params_)
+best_lgbm.fit(X_train, y_train, categorical_feature=categorical_features)
 
-print(f'Best Parameters: {grid_search.best_params_}')
-print(f'Best Cross-Validation Accuracy: {grid_search.best_score_}')
-
-lgbm = lgb.LGBMClassifier(**grid_search.best_params_)
-lgbm.fit(X_train, y_train)
-
-y_pred = lgbm.predict(X_val)
-y_pred_p = lgbm.predict_proba(X_val)[:, 1]
-
+y_pred = best_lgbm.predict(X_val)
+y_pred_p = best_lgbm.predict_proba(X_val)[:, 1]
 accuracy_val = sklearn.metrics.accuracy_score(y_val, y_pred)
 auc_val = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
 print('Validation accuracy: {:.4f}, AUC: {:.4f}'.format(accuracy_val, auc_val))
+
+# =========== training roc ===========
+
+def lgbm_cross_val_predict(model, X, y, cv=5, cat_features=categorical_features):
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    y_pred = np.zeros(len(y))
+    y_pred_p = np.zeros(len(y))
+
+    for train_index, test_index in skf.split(X, y):
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train = y.iloc[train_index]
+
+        model.fit(X_train, y_train, categorical_feature=cat_features)
+        y_pred[test_index] = model.predict(X_test)
+        y_pred_p[test_index] = model.predict_proba(X_test)[:,1]
+
+    return y_pred, y_pred_p
+
+lgbm_cls = lgb.LGBMClassifier(random_state=42, **grid_search.best_params_)
+y_pred, y_pred_p = lgbm_cross_val_predict(lgbm_cls, X_train, y_train)
+
+accuracy = sklearn.metrics.accuracy_score(y_train, y_pred)
+auc = sklearn.metrics.roc_auc_score(y_train, y_pred_p)
+print('Train accuracy: {:.4f}, Train AUC: {:.4f}'.format(accuracy, auc))
+
 
 # ======================================= CatBoost  =======================================
 
-split_type = '19_2'
-all_data = process_df(all_features, cat='xg')
+split_type = 'random'
+all_data = process_df(all_features)
 X_train, y_train, X_val, y_val = load_data(all_data, split_type)
 
 # Train CatBoostClassifier
-cat_cls = CatBoostClassifier(iterations=10, learning_rate=0.1)
+cat_cls = CatBoostClassifier()
+param_grid = {
+    'iterations': [20, 30],
+    'learning_rate': [0.005, 0.01, 0.05],
+    'depth': [3, 6]
+}
+grid_search = GridSearchCV(cat_cls, param_grid, cv=5, scoring='roc_auc', n_jobs=-1)
+grid_search.fit(X_train, y_train, cat_features=categorical_features)
+print("Grid Search - Best Hyperparameters:", grid_search.best_params_)
 
-cat_cls.fit(X_train, y_train, cat_features=categorical_features)
+best_model = CatBoostClassifier(**grid_search.best_params_)
+best_model.fit(X_train, y_train, cat_features=categorical_features)
 
-# Make predictions and evaluate
-y_pred = cat_cls.predict(X_val)
-y_pred_p = cat_cls.predict_proba(X_val)[:, 1]
-
+y_pred = best_model.predict(X_val)
+y_pred_p = best_model.predict_proba(X_val)[:, 1]
 
 accuracy_val = sklearn.metrics.accuracy_score(y_val, y_pred)
 auc_val = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
-print('Validation accuracy: {:.4f}, AUC: {:.4f}'.format(accuracy_val, auc_val))
+print('Iter: {}, Validation accuracy: {:.4f}, AUC: {:.4f}'.format(iter_num, accuracy_val, auc_val))
+all_result['catboost'] = [y_val, y_pred_p]
+# ======== train AUC
+
+cat_cls = CatBoostClassifier(**grid_search.best_params_)
+y_pred, y_pred_p = catboost_cross_val_predict(cat_cls, X_train, y_train)
+
+accuracy = sklearn.metrics.accuracy_score(y_train, y_pred)
+auc = sklearn.metrics.roc_auc_score(y_train, y_pred_p)
+print('Train accuracy: {:.4f}, Train AUC: {:.4f}'.format(accuracy, auc))
+
+# ======== plot feature importance
+
+explainer = shap.TreeExplainer(best_model)
+shap_values = explainer.shap_values(X_val)
+shap.summary_plot(shap_values, X_val)
+
+# Bar plot of feature importance
+shap.summary_plot(shap_values, X_val, plot_type="bar")
 
 
-for col in categorical_features:
-    print(col)
-    val_train = X_train[col].unique()
-    print(val_train)
+if False:
+    iter_num = 30
+    cat_cls = CatBoostClassifier(iterations=iter_num, learning_rate=0.005)
+    cat_cls.fit(X_train, y_train, cat_features=categorical_features)
+
+    # Make predictions and evaluate
+    y_pred = cat_cls.predict(X_val)
+    y_pred_p = cat_cls.predict_proba(X_val)[:, 1]
+
+    accuracy_val = sklearn.metrics.accuracy_score(y_val, y_pred)
+    auc_val = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
+    print('Iter: {}, Validation accuracy: {:.4f}, AUC: {:.4f}'.format(iter_num, accuracy_val, auc_val))
 
 
 # ================= Random Forest =================
-categorical_cols = ['性别', '是否吸烟', 'PDL1_expression', '病理诊断_文本', '临床试验分期', '临床试验分期T', 'PDL1_number_none']
-numerical_cols = [col for col in df.columns if col not in categorical_cols + ['imageName', 'Group', 'set', 'ORR', 'y']]
 
-def fill_missing_with_category(X):
-    return X.fillna('Missing')
+def process_df_rf(all_features):
+    all_features['PDL1_number'] = all_features['PDL1_number'].replace('missing', np.nan)
+    all_features['PDL1_number'] = pd.to_numeric(all_features['PDL1_number'])
 
-numerical_transformer = SimpleImputer(strategy='mean')
-categorical_transformer = Pipeline(steps=[
-    ('fillna', FunctionTransformer(fill_missing_with_category, validate=False)),
-    ('onehot', OneHotEncoder(handle_unknown='ignore'))
-])
+    trans = 'log1p'
+    # === which transformation
+    if trans == 'box-cox':
+        from scipy.stats import boxcox
+        data_positive = all_features['ORR']/100 + 1  # Adding 1 to ensure all values are positive
+        transformed_data, lambda_value = boxcox(data_positive)
+        all_features['y'] = ((all_features['ORR']/100 + 1)**lambda_value - 1)/lambda_value
+    elif trans == 'log1p':
+        all_features['y'] = np.log1p(all_features['ORR']/100 + 1)
 
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', numerical_transformer, numerical_cols),
-        ('cat', categorical_transformer, categorical_cols)
+    categorical_cols = ['性别', '是否吸烟', 'PDL1_expression', '病理诊断_文本', '临床试验分期', '临床试验分期T']
+    numerical_cols = [col for col in all_features.columns if col not in categorical_cols + ['imageName', 'Group', 'set', 'ORR', 'y']]
+
+    def fill_missing_with_category(X):
+        return X.fillna('Missing')
+
+    numerical_transformer = SimpleImputer(strategy='mean')
+    categorical_transformer = Pipeline(steps=[
+        ('fillna', FunctionTransformer(fill_missing_with_category, validate=False)),
+        ('onehot', OneHotEncoder(handle_unknown='ignore'))
     ])
 
-for df in [train_df, test_df]:
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', numerical_transformer, numerical_cols),
+            ('cat', categorical_transformer, categorical_cols)
+        ])
+
     for col in categorical_cols:
-        df[col] = df[col].astype(str)
+        all_features[col] = all_features[col].astype(str)
         print('col {} is str'.format(col))
     for col in numerical_cols:
-        df[col] = pd.to_numeric(df[col])
+        all_features[col] = pd.to_numeric(all_features[col])
         print('col {} is numeric'.format(col))
 
-X_train, y_train = train_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), train_df['Group']
-X_val, y_val = test_df.drop(columns=['imageName', 'Group', 'set', 'ORR', 'y']), test_df['Group']
+    return all_features, preprocessor
+
+split_type = 'random'
+all_data, preprocessor = process_df_rf(all_features)
+X_train, y_train, X_val, y_val = load_data(all_data, split_type)
+
 
 model = RandomForestClassifier(n_estimators=100, random_state=42)
 clf = Pipeline(steps=[('preprocessor', preprocessor),
@@ -277,9 +354,25 @@ clf.fit(X_train, y_train)
 
 y_pred = clf.predict(X_val)
 y_pred_p = clf.predict_proba(X_val)[:, 1]
+print("Accuracy: {:.4f}, AUC: {:.4f}".format(accuracy_score(y_val, y_pred), sklearn.metrics.roc_auc_score(y_val, y_pred_p)))
 
-# Evaluate the model
-print("Accuracy:", accuracy_score(y_val, y_pred))
-print("AUC", sklearn.metrics.roc_auc_score(y_val, y_pred_p))
-print("Classification Report:")
-print(sklearn.metrics.classification_report(y_val, y_pred))
+if split_type == 'random':
+    random_result['RandomForest'] = [y_val, y_pred_p]
+
+
+# =====
+# Plot ROC curve
+plt.figure(figsize=(8, 6))
+plt.plot([0, 1], [0, 1], lw=2, linestyle='--')
+for key, value in random_result.items():
+    y_val, y_pred = value
+    fpr, tpr, _ = roc_curve(y_val, y_pred)
+    plt.plot(fpr, tpr, lw=2, label=key, alpha=0.5)
+
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Receiver Operating Characteristic (ROC) Curve for Random Split')
+plt.legend(loc='lower right')
+plt.show()

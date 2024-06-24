@@ -1,9 +1,12 @@
 import sklearn
+import numpy as np
 from sklearn.metrics import roc_curve, auc
 from matplotlib import pyplot as plt
 import matplotlib
 import seaborn as sns
 from sklearn.metrics import confusion_matrix
+
+categorical_features = ['性别', '是否吸烟', 'PDL1_expression', '病理诊断_文本', '临床试验分期', '临床试验分期T']
 
 def plot_roc(y_val, y_pred):
     fpr, tpr, _ = roc_curve(y_val, y_pred)
@@ -65,3 +68,20 @@ def plot_feat_importance(cls, columns, K=20):
     plt.title('Feature Importance')
     plt.gca().invert_yaxis()  # Invert y-axis to display top features at the top
     plt.show()
+
+
+def catboost_cross_val_predict(model, X, y, cv=5, cat_features=categorical_features):
+    from sklearn.model_selection import StratifiedKFold
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    y_pred = np.zeros(len(y))
+    y_pred_p = np.zeros(len(y))
+
+    for train_index, test_index in skf.split(X, y):
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train = y.iloc[train_index]
+
+        model.fit(X_train, y_train, cat_features=cat_features)
+        y_pred[test_index] = model.predict(X_test)
+        y_pred_p[test_index] = model.predict_proba(X_test)[:,1]
+
+    return y_pred, y_pred_p
