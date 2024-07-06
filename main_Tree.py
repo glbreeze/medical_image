@@ -23,6 +23,10 @@ n_feat = 30
 categorical_features = ['性别', '是否吸烟', 'PDL1_expression', '病理诊断_文本', '临床试验分期', '临床试验分期T']
 
 all_result ={}
+feature_map = {'年龄':'age', '性别':'gender', '是否吸烟':'smoking', '每日吸烟数量': 'smoking',
+               '病理诊断_文本': 'pathological_diagnosis', '病例完成治疗的周期数': 'treatment_cycles', '临床试验分期T': 'treatment_phase_T',
+               '临床试验N分期': 'treatment_phase_N', '临床试验分期': 'treatment_phase',
+               'wavelet2-LLL_gldm_LargeDependenceHighGrayLevelEmphasis': 'wavelet2-LLL_gldm_LargeDHighGrayLevelEmphasis'}
 
 # ========================================== clinical feature ============================================
 cl_features = pd.read_excel(os.path.join(folder, '影像组学总库2024-6-6.xlsx'))
@@ -52,11 +56,12 @@ cl_features = cl_features[cl_features['Group'].notna()]
 
 # ====================== ml feature and feature selection======================
 ml_features = pd.read_excel(os.path.join(folder, 'ml_feature_2.xlsx'))
-ml_features = pd.merge(cl_features[cl_features['set'].isin(['lungmate-009', 'lungmate-002', 'lungmate-001'])]['imageName'],
+ml_features = pd.merge(cl_features[cl_features['set'].isin(['lungmate-009', 'lungmate-002', 'lungmate-001'])][['imageName', 'set']],
                        ml_features, on='imageName', how='inner')
+ml_features_train = ml_features[ml_features['set'].isin(['lungmate-009', 'lungmate-001'])]
 
-X = ml_features.drop(columns=['imageName', 'Group'])  # Exclude non-feature columns
-y = ml_features['Group']
+X = ml_features_train.drop(columns=['imageName', 'Group', 'set'])  # Exclude non-feature columns
+y = ml_features_train['Group']
 
 method = 'rf'
 if method == 'rf':
@@ -97,6 +102,8 @@ if False:
 for col in all_features.columns:
     if all_features[col].isna().any():
         print(col, 'has na',  all_features[col].isna().any())
+
+all_features = pd.read_csv(os.path.join(folder, 'all_features.csv'))
 
 # ================================== Preprocess features for XGBoost ==============================
 def process_df(all_features):
@@ -139,7 +146,6 @@ def load_data(all_data, split_type):
                                                           all_data['Group'], test_size=0.3, random_state=21)
     return X_train, y_train, X_val, y_val
 
-
 # ========================================= XGBoost Classification =====================================
 
 split_type = '19_2'
@@ -177,7 +183,7 @@ plot_roc(y_val, y_pred_p)
 
 # =========== training roc ===========
 best_model = xgb.XGBClassifier(**grid_search.best_params_)
-y_pred_p = cross_val_predict(best_model, X_train, y_train, cv=37, method='predict_proba')
+y_pred_p = cross_val_predict(best_model, X_train, y_train, cv=10, method='predict_proba')
 y_pred = np.argmax(y_pred_p, axis=1)
 y_pred_p = y_pred_p[:,1]
 accuracy = sklearn.metrics.accuracy_score(y_train, y_pred)
@@ -201,7 +207,7 @@ param_grid = {
     "subsample": [0.8, 1.0]
 }
 grid_search = GridSearchCV(lgbm, param_grid, cv=5, scoring="roc_auc")
-grid_search.fit(X_train, y_train)
+grid_search.fit(X_train, y_train, categorical_feature=categorical_features)
 print(f"Best parameters: {grid_search.best_params_}")
 print(f"Best score: {grid_search.best_score_}")
 
@@ -213,6 +219,8 @@ y_pred_p = best_lgbm.predict_proba(X_val)[:, 1]
 accuracy_val = sklearn.metrics.accuracy_score(y_val, y_pred)
 auc_val = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
 print('Validation accuracy: {:.4f}, AUC: {:.4f}'.format(accuracy_val, auc_val))
+
+all_result['lgbm'] = [y_val, y_pred_p]
 
 # =========== training roc ===========
 
@@ -238,17 +246,16 @@ accuracy = sklearn.metrics.accuracy_score(y_train, y_pred)
 auc = sklearn.metrics.roc_auc_score(y_train, y_pred_p)
 print('Train accuracy: {:.4f}, Train AUC: {:.4f}'.format(accuracy, auc))
 
-
 # ======================================= CatBoost  =======================================
 
-split_type = 'random'
+split_type = '19_2'
 all_data = process_df(all_features)
 X_train, y_train, X_val, y_val = load_data(all_data, split_type)
 
 # Train CatBoostClassifier
 cat_cls = CatBoostClassifier()
 param_grid = {
-    'iterations': [20, 30],
+    'iterations': [30, 50, 100],
     'learning_rate': [0.005, 0.01, 0.05],
     'depth': [3, 6]
 }
@@ -264,7 +271,8 @@ y_pred_p = best_model.predict_proba(X_val)[:, 1]
 
 accuracy_val = sklearn.metrics.accuracy_score(y_val, y_pred)
 auc_val = sklearn.metrics.roc_auc_score(y_val, y_pred_p)
-print('Iter: {}, Validation accuracy: {:.4f}, AUC: {:.4f}'.format(iter_num, accuracy_val, auc_val))
+print('Validation accuracy: {:.4f}, AUC: {:.4f}'.format( accuracy_val, auc_val))
+
 all_result['catboost'] = [y_val, y_pred_p]
 # ======== train AUC
 
@@ -276,10 +284,11 @@ auc = sklearn.metrics.roc_auc_score(y_train, y_pred_p)
 print('Train accuracy: {:.4f}, Train AUC: {:.4f}'.format(accuracy, auc))
 
 # ======== plot feature importance
-
+import shap
 explainer = shap.TreeExplainer(best_model)
 shap_values = explainer.shap_values(X_val)
-shap.summary_plot(shap_values, X_val)
+shap.summary_plot(shap_values, X_val, feature_names=[feature_map[col] if col in feature_map.keys() else col for col in X_val.columns],
+                  max_display=20)
 
 # Bar plot of feature importance
 shap.summary_plot(shap_values, X_val, plot_type="bar")
@@ -342,29 +351,96 @@ def process_df_rf(all_features):
 
     return all_features, preprocessor
 
-split_type = 'random'
+split_type = '19_2'
 all_data, preprocessor = process_df_rf(all_features)
 X_train, y_train, X_val, y_val = load_data(all_data, split_type)
 
-
 model = RandomForestClassifier(n_estimators=100, random_state=42)
-clf = Pipeline(steps=[('preprocessor', preprocessor),
-                      ('classifier', model)])
-clf.fit(X_train, y_train)
+pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                           ('model', model)])
+pipeline.fit(X_train, y_train)
+param_grid = {
+    'model__n_estimators': [100, 200, 300],
+    'model__max_depth': [None, 10, 20, 30],
+    'model__min_samples_split': [1, 2, 5],
+    'model__min_samples_leaf': [1, 2, 4],
+}
 
-y_pred = clf.predict(X_val)
-y_pred_p = clf.predict_proba(X_val)[:, 1]
+grid_search = GridSearchCV(pipeline, param_grid, cv=5, n_jobs=-1, scoring='roc_auc')
+grid_search.fit(X_train, y_train)
+
+best_params = grid_search.best_params_
+print(f'Best parameters: {best_params}')
+
+# pipeline = grid_search.best_estimator_
+model = RandomForestClassifier(**{key.replace('model__', ''): value for key, value in best_params.items()}, random_state=42)
+pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                           ('model', model)])
+pipeline.fit(X_train, y_train)
+
+y_pred = pipeline.predict(X_val)
+y_pred_p = pipeline.predict_proba(X_val)[:, 1]
 print("Accuracy: {:.4f}, AUC: {:.4f}".format(accuracy_score(y_val, y_pred), sklearn.metrics.roc_auc_score(y_val, y_pred_p)))
 
-if split_type == 'random':
-    random_result['RandomForest'] = [y_val, y_pred_p]
+all_result['random_forest'] = [y_val, y_pred_p]
+
+# ===== train_auc
+model = RandomForestClassifier(**{key.replace('model__', ''): value for key, value in best_params.items()}, random_state=42)
+pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                           ('model', model)])
+y_pred_p = cross_val_predict(pipeline, X_train, y_train, method='predict_proba', cv=5, n_jobs=-1)
+y_pred = np.argmax(y_pred_p, axis=-1)
+y_pred_p = y_pred_p[:,1]
+print("Accuracy: {:.4f}, AUC: {:.4f}".format(accuracy_score(y_train, y_pred), sklearn.metrics.roc_auc_score(y_train, y_pred_p)))
+
+
+# =================================== train svm ===================================
+from sklearn.svm import SVC
+model = SVC(random_state=42, probability=True)
+pipeline = Pipeline(steps=[
+    ('preprocessor', preprocessor),
+    ('model', model)
+])
+
+param_grid = {
+    'model__C': [0.1, 1, 10],
+    'model__gamma': [1, 0.1, 0.01, 0.001],
+    'model__kernel': ['rbf', 'linear']
+}
+
+grid_search = GridSearchCV(pipeline, param_grid, cv=5, n_jobs=-1, scoring='accuracy')
+grid_search.fit(X_train, y_train)
+
+best_params = grid_search.best_params_
+print(f'Best parameters: {best_params}')
+best_model = grid_search.best_estimator_
+
+y_pred = best_model.predict(X_val)
+y_pred_p = best_model.predict_proba(X_val)[:, 1]
+print("Accuracy: {:.4f}, AUC: {:.4f}".format(accuracy_score(y_val, y_pred), sklearn.metrics.roc_auc_score(y_val, y_pred_p)))
+
+all_result['svc'] = [y_val, y_pred_p]
+
+# ======= train auc
+
+model = SVC(**{key.replace('model__', ''): value for key, value in best_params.items()}, random_state=42, probability=True)
+pipeline = Pipeline(steps=[('preprocessor', preprocessor),
+                           ('model', model)])
+y_pred_p = cross_val_predict(pipeline, X_train, y_train, method='predict_proba', cv=5, n_jobs=-1)
+y_pred = np.argmax(y_pred_p, axis=-1)
+y_pred_p = y_pred_p[:,1]
+print("Accuracy: {:.4f}, AUC: {:.4f}".format(accuracy_score(y_train, y_pred), sklearn.metrics.roc_auc_score(y_train, y_pred_p)))
+
+
+
+
 
 
 # =====
 # Plot ROC curve
 plt.figure(figsize=(8, 6))
 plt.plot([0, 1], [0, 1], lw=2, linestyle='--')
-for key, value in random_result.items():
+for key, value in all_result.items():
     y_val, y_pred = value
     fpr, tpr, _ = roc_curve(y_val, y_pred)
     plt.plot(fpr, tpr, lw=2, label=key, alpha=0.5)
@@ -373,6 +449,6 @@ plt.xlim([0.0, 1.0])
 plt.ylim([0.0, 1.05])
 plt.xlabel('False Positive Rate')
 plt.ylabel('True Positive Rate')
-plt.title('Receiver Operating Characteristic (ROC) Curve for Random Split')
+plt.title('Receiver Operating Characteristic (ROC) Curve for Test Set')
 plt.legend(loc='lower right')
 plt.show()

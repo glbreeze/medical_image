@@ -72,7 +72,7 @@ def plot_feat_importance(cls, columns, K=20):
 
 def catboost_cross_val_predict(model, X, y, cv=5, cat_features=categorical_features):
     from sklearn.model_selection import StratifiedKFold
-    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=17)
     y_pred = np.zeros(len(y))
     y_pred_p = np.zeros(len(y))
 
