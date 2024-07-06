@@ -58,6 +58,7 @@ cl_features = cl_features[cl_features['Group'].notna()]
 ml_features = pd.read_excel(os.path.join(folder, 'ml_feature_2.xlsx'))
 ml_features = pd.merge(cl_features[cl_features['set'].isin(['lungmate-009', 'lungmate-002', 'lungmate-001'])][['imageName', 'set']],
                        ml_features, on='imageName', how='inner')
+
 ml_features_train = ml_features[ml_features['set'].isin(['lungmate-009', 'lungmate-001'])]
 
 X = ml_features_train.drop(columns=['imageName', 'Group', 'set'])  # Exclude non-feature columns

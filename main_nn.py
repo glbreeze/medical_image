@@ -95,11 +95,6 @@ def get_loader(X_train, y_train, X_val, y_val):
     test_loader = DataLoader(test_dataset, batch_size=16, shuffle=False)
     return  train_loader, test_loader
 
-
-all_data, preprocessor = process_data(all_df)
-X_train, y_train, X_val, y_val = split_process_data(all_data, preprocessor=preprocessor, split_type='19_2')
-train_loader, test_loader = get_loader(X_train, y_train, X_val, y_val)
-
 # ======== define model
 class MLP(nn.Module):
     def __init__(self, input_dim, arch='256_256', bn='p'):
@@ -155,6 +150,8 @@ def trainer(model, optimizer, train_loader, test_loader, epoch=50):
         num_cor = 0
         num_all = 0
         for inputs, targets in train_loader:
+            if len(targets) <= 2:
+                continue
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -174,6 +171,10 @@ def trainer(model, optimizer, train_loader, test_loader, epoch=50):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
             }, 'best_ckpt.pth')
+
+all_data, preprocessor = process_data(all_df)
+X_train, y_train, X_val, y_val = split_process_data(all_data, preprocessor=preprocessor, split_type='9_12')
+train_loader, test_loader = get_loader(X_train, y_train, X_val, y_val)
 
 
 input_dim = train_loader.dataset.__getitem__(0)[0].shape[0]
