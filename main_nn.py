@@ -173,7 +173,7 @@ def trainer(model, optimizer, train_loader, test_loader, epoch=50):
             }, 'best_ckpt.pth')
 
 all_data, preprocessor = process_data(all_df)
-X_train, y_train, X_val, y_val = split_process_data(all_data, preprocessor=preprocessor, split_type='9_12')
+X_train, y_train, X_val, y_val = split_process_data(all_data, preprocessor=preprocessor, split_type='19_2')
 train_loader, test_loader = get_loader(X_train, y_train, X_val, y_val)
 
 
